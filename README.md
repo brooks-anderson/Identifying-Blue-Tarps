@@ -12,7 +12,7 @@ Random Forest | Support-Vector Machine (Polynomial Kernel)
 :------------:|:----------------------------------------:
 ![image](https://user-images.githubusercontent.com/72112566/157329841-23116f58-f182-4834-a007-97e6c6e13a17.png) | ![image](https://user-images.githubusercontent.com/72112566/157329890-599ec77c-52e3-469b-b8d6-76b24055eeaa.png) 
 
-Additional details, methods, and conclusions can be found in `Finding_Blue_Tarps.pdf`
+Additional details, methods, and conclusions can be found in `Finding-Blue-Tarps.pdf`
 
 ---
 ### File Organization
@@ -20,6 +20,6 @@ This repository contains three files:
 + `Identifying_Blue_Tarps.Rmd` - Rmarkdown file containing code for preprocessing and model evaluation
 + `Identifying_Blue_Tarps.html` - Rendered Rmarkdown file. Viewable here:  
    https://htmlpreview.github.io/?https://github.com/brooks-anderson/Identifying-Blue-Tarps/blob/main/Identifying_Blue_Tarps.html
-+ `Finding_Blue_Tarps.pdf` - PDF presentation of my findings and conclusions
++ `Finding-Blue-Tarps.pdf` - PDF presentation of my findings and conclusions
 
 Source data is not provided since I do not have ownership.
