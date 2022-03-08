@@ -8,7 +8,7 @@ https://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.388.2622&rep=rep1&type
 
 I expand upon this study by comparing eight model types: *k-Nearest Neighbors, Linear Discriminant Analysis, Quadratic Discriminant Analysis, Logistic Regression, Random Forest, Support Vector Machine (polynomial kernel), Support Vector Machine (RBF kernel), Mahalanobis Classifier.* I also develop a framework for visualizing binary classifier decision boundaries in two dimensions.
 
-Random Forest | Support-Vector Machine (Polynomial Kernel
+Random Forest | Support-Vector Machine (Polynomial Kernel)
 :------------:|:----------------------------------------:
 ![image](https://user-images.githubusercontent.com/72112566/157329841-23116f58-f182-4834-a007-97e6c6e13a17.png) | ![image](https://user-images.githubusercontent.com/72112566/157329890-599ec77c-52e3-469b-b8d6-76b24055eeaa.png) 
 
