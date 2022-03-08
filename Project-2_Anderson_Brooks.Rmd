@@ -1,0 +1,1402 @@
+---
+title: 'Disaster Relief'
+subtitle: 'Searching for Blue Tarps II'
+author: |
+  | Brooks Anderson
+  | gcu6hc@virginia.edu
+date: "12/5/2021"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: lumen
+    df_print: paged
+  pdf_document:
+    extra_dependencies: amsmath
+---
+
+```{r glob_opts, include=FALSE}
+knitr::opts_chunk$set(message=FALSE, 
+                      warning=FALSE,
+                      cache = TRUE)
+
+```
+
+# Data Loading
+
+In part I, we tested four models: kNN, LDA, QDA, and Logistic Regression. We use the dataset
+from part I as the training dataset fo part II of the project.
+We compare the following models: `kNN`, `LDA`, `QDA`, `Logistic Regression`, `Random Forest`, and `SVM`.
+
+## Preliminary Steps
+We attach the packages required for the analysis.
+```{r packages}
+library(tidyverse)  # data manipulation
+library(ggplot2)    # plots
+library(caret)      # model training
+library(ROCR)       # ROC tools
+library(viridis)    # ggplot coloring
+library(e1071)      # SVM
+library(kernlab)    # SVM
+```
+
+---
+
+## Training Data
+```{r training}
+# load training data from part 1
+tuning <- read.csv("HaitiPixels.csv")
+names(tuning) <- tolower(names(tuning))   # lowercase col names
+
+# Make response variable binary
+tuning$class <- ifelse(tuning$class == "Blue Tarp", "tarp", "other") %>% factor()
+
+# RGB variables to numeric
+tuning$red <- as.numeric(tuning$red)
+tuning$green <- as.numeric(tuning$green)
+tuning$blue <- as.numeric(tuning$blue)
+
+# preview
+summary(tuning)
+
+# boxplots of each RGB variable by surface type
+tuning %>% pivot_longer(!class, names_to = "variable", values_to = "value") %>% 
+    ggplot(aes(x=class, y=value))+geom_boxplot(aes(col = "white", fill = variable))+
+    scale_fill_manual(values = c(red = "#FF4E3F", green = "#50E23F", blue = "#504EB5"), guide = 'none')+
+    scale_color_manual(values = "white", guide = 'none')+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+    facet_wrap(.~variable)+ggtitle("Training Data")
+```
+
+```{r training_density}
+tuning %>% pivot_longer(!class, names_to = "variable", values_to = "value") %>% 
+    ggplot()+
+  geom_density(col = NA, alpha = 0.5, aes(x=value, fill = variable))+
+  scale_fill_manual(values = c(red = "#FF4E3F", green = "#50E23F", blue = "#504EB5"), guide = 'none')+
+  xlim(0,255)+ ylim(0, 0.025)+
+  geom_boxplot(lwd = 1, fatten = 1, fill = NA, width = 0.005, aes(x=value, y = 0.005))+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.title.y = element_blank())+
+  facet_wrap(.~variable, nrow = 3)+ggtitle("Training Data")
+```
+```{r training_violin}
+tuning %>% pivot_longer(!class, names_to = "variable", values_to = "value") %>% 
+    ggplot(aes(x=value, y=class))+
+  geom_violin(col = "white", aes(fill = variable))+
+  scale_fill_manual(values = c(red = "#9C2C34", green = "#38c08c", blue = "#1E5B79"), guide = 'none')+
+  geom_boxplot(col= "white", alpha=0.01, width = 0.05, fatten = 1)+
+  #stat_summary(fun.data = data_summary)+
+  xlim(0,255)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.title.y = element_blank(), axis.title.x = element_blank())+
+  facet_wrap(.~variable)+ggtitle("Training Data")
+```
+
+```{r interactive_train_plot}
+# Create interactive plot
+options(rgl.useNULL=TRUE)
+plotids <- rgl::plot3d(x = tuning$red,
+            y = tuning$green,
+            z = tuning$blue,
+            col = rgb(tuning$red, tuning$green, tuning$blue, maxColorValue = 255),
+            xlab = "Red",
+            ylab = "Green",
+            zlab = "Blue",
+            xlim = c(0,255),
+            ylim = c(0,255),
+            zlim = c(0,255),
+            main = "Training Data")
+rgl::rglwidget()
+```
+
+---
+
+## Holdout Data
+There are seven files to read in identified by the numbers `057`, `067`, `069`, and `078`.For each
+of `067`, `069`, and `078` there are a pair of files-- one for tarps and one for non-tarps. File `057` has
+non-tarp observations.
+
+We create a function to process the holdout data `.txt` files.
+```{r file_processing_functoin}
+# write a function to process text files
+
+processPixels <- function(fileName){
+    if(!is.character(fileName)){
+        stop("Please provide string input.")
+    } else if(!grepl(".txt", fileName)){
+        stop("File Name invalid.")
+    }
+    
+    dt <- read.table(fileName, skip = 8, header = F)    # read in data from file
+    dt <- dt[, (ncol(dt)-2):ncol(dt)]                   # keep only RGB cols
+    names(dt) <- c("red", "green", "blue")              # add col names
+    
+    # if NOT or NON in file name, label data as other, else tarp
+    if(grepl("NOT", fileName) | grepl("NON", fileName)){
+        dt$class <- rep("other", nrow(dt))
+    } else{
+        dt$class <- rep("tarp", nrow(dt))
+    }
+    
+    dt$class <- dt$class %>% factor()
+    dt$red <- as.numeric(dt$red)
+    dt$green <- as.numeric(dt$green)
+    dt$blue <- as.numeric(dt$blue)
+    
+    return(dt)
+}
+```
+
+Now we process the text files and combine into a single holdout set. It is assumed
+that the text files exist in the present directory.
+```{r construct_holdout_set}
+other057 <- processPixels("orthovnir057_ROI_NON_Blue_Tarps.txt")
+tarp067 <- processPixels("orthovnir067_ROI_Blue_Tarps.txt")
+other067 <- processPixels("orthovnir067_ROI_NOT_Blue_Tarps.txt")
+tarp069 <- processPixels("orthovnir069_ROI_Blue_Tarps.txt")
+other069 <- processPixels("orthovnir069_ROI_NOT_Blue_Tarps.txt")
+tarp078 <- processPixels("orthovnir078_ROI_Blue_Tarps.txt")
+other078 <- processPixels("orthovnir078_ROI_NON_Blue_Tarps.txt")
+
+holdout <- rbind(other057, tarp067, other067, tarp069, other069, tarp078, other078)
+rm(other057, tarp067, other067, tarp069, other069, tarp078, other078)
+
+write.csv(holdout, "holdout.csv")
+
+summary(holdout)
+```
+
+Preview the holdout data.
+```{r holdout_boxplots}
+# boxplots of each RGB variable by surface type
+holdout %>% pivot_longer(!class, names_to = "variable", values_to = "value") %>% 
+    ggplot(aes(x=class, y=value))+geom_boxplot(aes(col = "white", fill = variable))+
+    scale_fill_manual(values = c(red = "#8B4737", green = "#4C7537", blue = "#4C4758"), guide = 'none')+
+    scale_color_manual(values = "white", guide = 'none')+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+    facet_wrap(.~variable)+ggtitle("Holdout Data")
+```
+
+```{r holdout_density}
+holdout %>% pivot_longer(!class, names_to = "variable", values_to = "value") %>% 
+    ggplot()+
+  geom_density(col = NA, alpha = 0.5, aes(x=value, fill = variable))+
+  scale_fill_manual(values = c(red = "#8B4737", green = "#4C7537", blue = "#4C4758"), guide = 'none')+
+  xlim(0,255)+ylim(0,0.025)+
+  geom_boxplot(lwd = 1, fatten = 1, fill = NA, width = 0.005, aes(x=value, y = 0.005))+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.title.y = element_blank())+
+  facet_wrap(.~variable, nrow = 3)+ggtitle("Holdout Data")
+```
+
+```{r holdout_violin}
+holdout %>% pivot_longer(!class, names_to = "variable", values_to = "value") %>% 
+    ggplot(aes(x=value, y=class))+
+  geom_violin(col = "white", aes(fill = variable))+
+  scale_fill_manual(values = c(red = "#9C2C34", green = "#38c08c", blue = "#1E5B79"), guide = 'none')+
+  geom_boxplot(col= "white", alpha=0.01, width = 0.05, fatten = 1)+
+  #stat_summary(fun.data = data_summary)+
+  xlim(0,255)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.title.y = element_blank(), axis.title.x = element_blank())+
+  facet_wrap(.~variable)+ggtitle("Holdout Data")
+```
+
+```{r holdout_interactive}
+# Create interactive plot
+# The holdout data is ~ 2e10^6 observation. The plot takes a long time to generate.
+# We randomly sample 5% of the holdout set and plot only these points.
+
+set.seed(199)
+holdout.sample <- holdout[sample(nrow(holdout), round(0.005*nrow(holdout))), ]
+
+options(rgl.useNULL=TRUE)
+plotids <- rgl::plot3d(x = holdout.sample$red,
+            y = holdout.sample$green,
+            z = holdout.sample$blue,
+            col = rgb(holdout.sample$red,
+                      holdout.sample$green,
+                      holdout.sample$blue,
+                      maxColorValue = 255),
+            xlab = "Red",
+            ylab = "Green",
+            zlab = "Blue",
+            xlim = c(0,255),
+            ylim = c(0,255),
+            zlim = c(0,255),
+            main = "Holdout Data")
+rgl::rglwidget()
+```
+
+---
+
+# Data Splitting
+*Outline methodology for splitting training data.*
+
++ Determine train/test ratio
++ Use train subset to tune model parameters (if necessary)
++ Evaluate models on test subset
++ *re-fit model with entire training set?*
++ Evaluate models on holdout set
+```{r training_indices}
+set.seed(199)
+train <- createDataPartition(tuning$class, p = 0.5, list = F)
+
+# create new dataframes of test data to be passed to predict()
+testX <- tuning[-train, ] %>% dplyr::select(-class)
+testLabels <- tuning[-train, 'class']
+
+# split holdout data similarly
+holdoutX <- holdout %>% select(-class)
+holdoutLabels <- holdout$class
+
+# create list of seeds for kNN and other 1-parameter models
+set.seed(199)
+seeds <- vector(mode = "list", length = 51)
+for(i in 1:(length(seeds)-1)) seeds[[i]]<- sample.int(n=1000, 20)
+seeds[[51]]<-sample.int(1000, 1)
+
+# create list of seeds for SVM (RBF kernel) and other 2-parameter models
+set.seed(199)
+# ... how do I do this ...
+
+# trainControl for tuning
+ctrl <- trainControl(method= "repeatedcv", repeats = 5, seeds = seeds)
+```
+
+---
+
+# k-Nearest Neighbors {.tabset}
+## Training
+We use the training data to tune the model. We want to identify the value of $k$
+that provides the lowest cross-validation error. The `train()` function from the
+`caret` package is used.
+```{r knn_tuning}
+knn.tuning <- train(class~.,
+                    data = tuning,
+                    subset = train,
+                    method = "knn",
+                    metric = "Accuracy",
+                    trControl = ctrl,
+                    preProcess = c("center","scale"),
+                    tuneLength = 15)
+                    #tuneGrid = expand.grid(k = seq(5,24)))
+
+knn.tuning
+```
+10-fold cross-validation, repeated five times, selects `k = 5`.
+```{r knn_tuning_performance}
+knn.preds <- predict(knn.tuning, newdata = testX)
+confusionMatrix(knn.preds, testLabels, positive = "tarp")
+```
+The Accuracy on the test subset is 0.9971
+
+## Holdout
+For sake of comparison, we make predictions on the holdout set using both models.
+```{r knn_holdout_predictions}
+# Predict labels on holdout data. Create confusion matrix
+knn.holdout.preds <- predict(knn.tuning, newdata = holdoutX)
+confusionMatrix(knn.holdout.preds, holdoutLabels, positive = "tarp")
+
+# Predict Probabilities for ROC
+knn.holdout.probs <- predict(knn.tuning, newdata = holdoutX, type = "prob")
+
+knn.rates <- prediction(knn.holdout.probs[2], holdoutLabels)
+knn.ROC <- performance(knn.rates, measure = "tpr", x.measure = "fpr")
+
+knn.auc <- performance(knn.rates, measure = "auc")
+knn.auc@y.values #auc = 0.9625007
+```
+
+```{r knn_holdout_ROC}
+# colorize ROC
+knn.roc.df <- data.frame(c("FPR" = knn.ROC@x.values, "TPR" = knn.ROC@y.values, "Threshold" = knn.ROC@alpha.values))
+knn.roc.df$Threshold[1] <- 1 # replace infinity
+
+knn.roc.df %>% ggplot(aes(FPR, TPR))+
+    geom_line(aes(color=Threshold), lwd = 2)+
+    scale_colour_viridis(option = "plasma")+
+    geom_abline(lwd = 1, color = "gray")+
+    theme_bw()+
+    theme(axis.line = element_line(color='gray'),
+          plot.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    ggtitle("ROC of kNN (k = 5)")+
+    annotate("text", x = 0.75, y = 0.25, label = "AUC = 0.9625")
+```
+
+```{r knn_decision_boundary}
+# create grid
+boundary.grid <- expand.grid(red = seq(25,255,length.out=151),
+                             green = seq(25,255,length.out=151),
+                             blue = seq(25,255,length.out=151))
+
+# predict over boundary.grid
+boundary.probs <- predict(knn.tuning, boundary.grid, type = "prob")
+boundary.df <- cbind(boundary.grid, boundary.probs[2])
+
+colPal <- c("#ff822e", "#ff9751", "#ffac74", "#ffc197", "#ffd5b9", 
+            "#ffeadc","#ffffff", "#dfedf9", "#c0dbf2", "#a0c9ec",
+            "#80b6e6", "#61a4df", "#4192d9")
+
+new.holdout <- holdout
+new.holdout$hitmiss <- factor(ifelse(knn.holdout.preds==holdout$class,'hit', 'miss'))
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$green==117)),
+                        breaks = seq(0,1.0001,length.out=14),
+                        aes(x=red, y=blue, z=tarp), bins = 13)+
+  scale_fill_manual(values = colPal,guide = "none")+
+    theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    geom_jitter(data = new.holdout[which(new.holdout$green==117), ],
+                size = 2, stroke = 1.3,
+                aes(x=red, y=blue, color=class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("kNN Decision Boundary [Blue against Red]")
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$red==140)),
+                        breaks = seq(0,1.0001,length.out=14),
+                        aes(x=green, y=blue, z=tarp), bins = 13)+
+  scale_fill_manual(values = colPal,guide = "none")+
+    theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    geom_jitter(data = new.holdout[which(new.holdout$red==140), ],
+                size = 2, stroke = 1.3,
+                aes(x=green, y=blue, color=class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("kNN Decision Boundary [Blue against Green]")
+```
+
+# Linear Discrimnant Analysis {.tabset}
+## Training
+Again, we use `train()` to fit the LDA model. There are no parameters to tune.
+```{r lda_tuning}
+lda.ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 5, seeds = seeds)
+
+lda.tuning <- train(class~.,
+                    data = tuning,
+                    subset = train,
+                    method = "lda",
+                    metric = "Accuracy",
+                    trControl = lda.ctrl)
+lda.tuning
+```
+
+We make predictions on the test subset.
+```{r lda_tuning_performance}
+lda.preds <- predict(lda.tuning, newdata = testX)
+confusionMatrix(lda.preds, testLabels, positive = "tarp")
+```
+
+## Holdout
+```{r lda_holdout_predictions}
+lda.holdout.preds <- predict(lda.tuning, newdata = holdoutX)
+confusionMatrix(lda.holdout.preds, holdoutLabels, positive = "tarp")
+
+# Predict Probabilities for ROC
+lda.holdout.probs <- predict(lda.tuning, newdata = holdoutX, type = "prob")
+
+lda.rates <- prediction(lda.holdout.probs[2], holdoutLabels)
+lda.ROC <- performance(lda.rates, measure = "tpr", x.measure = "fpr")
+
+lda.auc <- performance(lda.rates, measure = "auc")
+lda.auc@y.values #auc = 0.9921876
+```
+
+```{r lda_holdout_roc}
+# colorize ROC
+lda.roc.df <- data.frame(c("FPR" = lda.ROC@x.values, "TPR" = lda.ROC@y.values, "Threshold" = lda.ROC@alpha.values))
+lda.roc.df$Threshold[1] <- 1 # replace infinity
+
+lda.roc.df %>% ggplot(aes(FPR, TPR))+
+    geom_line(aes(color=Threshold), lwd = 2)+
+    scale_colour_viridis(option = "plasma")+
+    geom_abline(lwd = 1, color = "gray")+
+    theme_bw()+
+    theme(axis.line = element_line(color='gray'),
+          plot.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    ggtitle("ROC of LDA")+
+    annotate("text", x = 0.75, y = 0.25, label = "AUC = 0.9922")
+```
+
+```{r lda_decision_boundary}
+# predict over boundary.grid.
+boundary.probs <- predict(lda.tuning, boundary.grid, type = "prob")
+boundary.df <- cbind(boundary.grid, boundary.probs[2])
+
+new.holdout <- holdout
+new.holdout$hitmiss <- factor(ifelse(lda.holdout.preds==holdout$class,'hit', 'miss'))
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$green==117)),
+                        breaks = seq(0,1.0001,length.out=14),
+                        aes(x=red, y=blue, z=tarp), bins = 13)+
+  scale_fill_manual(values = colPal,guide = "none")+
+    theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    geom_jitter(data = new.holdout[which(new.holdout$green==117), ],
+                size = 2, stroke = 1.3,
+                aes(x=red, y=blue, color=class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("LDA Decision Boundary [Blue against Red]")
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$red==140)),
+                        breaks = seq(0,1.0001,length.out=14),
+                        aes(x=green, y=blue, z=tarp), bins = 13)+
+  scale_fill_manual(values = colPal,guide = "none")+
+    theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    geom_jitter(data = new.holdout[which(new.holdout$red==140), ],
+                size = 2, stroke = 1.3,
+                aes(x=green, y=blue, color=class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("LDA Decision Boundary [Blue against Green]")
+```
+
+# Quadratic Discriminant Analysis {.tabset}
+
+## Training
+We fit a QDA model with `train()`.
+```{r qda_tuning}
+qda.ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 5, seeds = seeds)
+
+qda.tuning <- train(class~.,
+                    data = tuning,
+                    subset = train,
+                    method = "qda",
+                    metric = "Accuracy",
+                    trControl = qda.ctrl)
+
+qda.tuning
+```
+
+Make predictions on the tuning subset.
+```{r qda_tuning_performance}
+qda.preds <- predict(qda.tuning, newdata = testX)
+confusionMatrix(qda.preds, testLabels, positive = 'tarp')
+```
+
+## Holdout
+Use the QDA model to make predictions on holdout.
+```{r qda_holdout_predictions}
+qda.holdout.preds <- predict(qda.tuning, newdata = holdoutX)
+confusionMatrix(qda.holdout.preds, holdoutLabels, positive = 'tarp')
+
+# Predict Probabilities for ROC
+qda.holdout.probs <- predict(qda.tuning, newdata = holdoutX, type = "prob")
+
+qda.rates <- prediction(qda.holdout.probs[2], holdoutLabels)
+qda.ROC <- performance(qda.rates, measure = "tpr", x.measure = "fpr")
+
+qda.auc <- performance(qda.rates, measure = "auc")
+qda.auc@y.values #auc = 0.9926837
+```
+
+```{r qda_holdout_roc}
+# colorize ROC
+qda.roc.df <- data.frame(c("FPR" = qda.ROC@x.values, "TPR" = qda.ROC@y.values, "Threshold" = qda.ROC@alpha.values))
+qda.roc.df$Threshold[1] <- 1 # replace infinity
+
+qda.roc.df %>% ggplot(aes(FPR, TPR))+
+    geom_line(aes(color=Threshold), lwd = 2)+
+    scale_colour_viridis(option = "plasma")+
+    geom_abline(lwd = 1, color = "gray")+
+    theme_bw()+
+    theme(axis.line = element_line(color='gray'),
+          plot.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    ggtitle("ROC of QDA")+
+    annotate("text", x = 0.75, y = 0.25, label = "AUC = 0.9927")
+```
+
+```{r qda_decision_boundary}
+# predict over boundary.grid.
+boundary.probs <- predict(qda.tuning, boundary.grid, type = "prob")
+boundary.df <- cbind(boundary.grid, boundary.probs[2])
+
+new.holdout <- holdout
+new.holdout$hitmiss <- factor(ifelse(qda.holdout.preds==holdout$class,'hit', 'miss'))
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$green==117)),
+                        breaks = seq(0,1.0001,length.out=14),
+                        aes(x=red, y=blue, z=tarp), bins = 13)+
+  scale_fill_manual(values = colPal,guide = "none")+
+    theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    geom_jitter(data = new.holdout[which(new.holdout$green==117), ],
+                size = 2, stroke = 1.3,
+                aes(x=red, y=blue, color=class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("QDA Decision Boundary [Blue against Red]")
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$red==140)),
+                        breaks = seq(0,1.0001,length.out=14),
+                        aes(x=green, y=blue, z=tarp), bins = 13)+
+  scale_fill_manual(values = colPal,guide = "none")+
+    theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    geom_jitter(data = new.holdout[which(new.holdout$red==140), ],
+                size = 2, stroke = 1.3,
+                aes(x=green, y=blue, color=class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("QDA Decision Boundary [Blue against Green]")
+```
+
+# Logistic Regression {.tabset}
+
+## Training
+```{r logistic_tuning}
+logistic.ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 5, seeds = seeds)
+
+logistic.tuning <- train(class~.,
+                         data = tuning,
+                         subset = train,
+                         method = "glm",
+                         family = "binomial",
+                         metric = "Accuracy",
+                         trControl = logistic.ctrl)
+logistic.tuning
+```
+
+Make prediction on the testing subset.
+```{r logistic_tuning_performance}
+logistic.preds <- predict(logistic.tuning, newdata = testX)
+confusionMatrix(logistic.preds, testLabels, positive = 'tarp')
+```
+
+## Holdout
+```{r logistic_holdout_predictions}
+logistic.holdout.preds <- predict(logistic.tuning, newdata = holdoutX)
+confusionMatrix(logistic.holdout.preds, holdoutLabels, positive = 'tarp')
+
+# Predict Probabilities for ROC
+logistic.holdout.probs <- predict(logistic.tuning, newdata = holdoutX, type = 'prob')
+
+logistic.rates <- prediction(logistic.holdout.probs[2], holdoutLabels)
+logistic.ROC <- performance(logistic.rates, measure = 'tpr', x.measure = 'fpr')
+
+logistic.auc <- performance(logistic.rates, measure = "auc")
+logistic.auc@y.values #auc = 0.9994541
+```
+
+```{r logistic_holdout_roc}
+# colorize ROC
+logistic.roc.df <- data.frame(c("FPR" = logistic.ROC@x.values, 
+                                "TPR" = logistic.ROC@y.values, 
+                                "Threshold" = logistic.ROC@alpha.values))
+logistic.roc.df$Threshold[1] <- 1 # replace infinity
+
+logistic.roc.df %>% ggplot(aes(FPR, TPR))+
+    geom_line(aes(color=Threshold), lwd = 2)+
+    scale_colour_viridis(option = "plasma")+
+    geom_abline(lwd = 1, color = "gray")+
+    theme_bw()+
+    theme(axis.line = element_line(color='gray'),
+          plot.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    ggtitle("ROC of Logistic Regression")+
+    annotate("text", x = 0.75, y = 0.25, label = "AUC = 0.9995")
+```
+
+```{r logistic_decision_boundary}
+# predict over boundary.grid.
+boundary.probs <- predict(logistic.tuning, boundary.grid, type = "prob")
+boundary.df <- cbind(boundary.grid, boundary.probs[2])
+
+new.holdout <- holdout
+new.holdout$hitmiss <- factor(ifelse(logistic.holdout.preds==holdout$class,'hit', 'miss'))
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$green==117)),
+                        breaks = seq(0,1.0001,length.out=14),
+                        aes(x=red, y=blue, z=tarp), bins = 13)+
+  scale_fill_manual(values = colPal,guide = "none")+
+    theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    geom_jitter(data = new.holdout[which(new.holdout$green==117), ],
+                size = 2, stroke = 1.3,
+                aes(x=red, y=blue, color=class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("Logistic Regression Decision Boundary [Blue against Red]")
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$red==140)),
+                        breaks = seq(0,1.0001,length.out=14),
+                        aes(x=green, y=blue, z=tarp), bins = 13)+
+  scale_fill_manual(values = colPal,guide = "none")+
+    theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    geom_jitter(data = new.holdout[which(new.holdout$red==140), ],
+                size = 2, stroke = 1.3,
+                aes(x=green, y=blue, color=class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("Logistic Regression Decision Boundary [Blue against Green]")
+```
+
+# Random Forest {.tabset}
+
+## Training
+```{r rf_tuning}
+rf.ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 5, seeds = seeds)
+
+rf.tuning <- train(class~.,
+                   data = tuning,
+                   subset = train,
+                   method = 'rf',
+                   metric = 'Accuracy',
+                   trControl = rf.ctrl,
+                   tuneGrid = expand.grid(mtry = c(2,3)))
+rf.tuning
+```
+
+```{r rf_tuning_performance}
+rf.preds <- predict(rf.tuning, newdata = testX)
+confusionMatrix(rf.preds, testLabels, positive = 'tarp')
+```
+
+## Holdout
+```{r rf_holdout_predictions}
+rf.holdout.preds <- predict(rf.tuning, newdata = holdoutX)
+confusionMatrix(rf.holdout.preds, holdoutLabels, positive = 'tarp')
+
+# Predict Probabilities for ROC
+rf.holdout.probs <- predict(rf.tuning, newdata = holdoutX, type = 'prob')
+
+rf.rates <- prediction(rf.holdout.probs[2], holdoutLabels)
+rf.ROC <- performance(rf.rates, measure = "tpr", x.measure = "fpr")
+
+rf.auc <- performance(rf.rates, measure = "auc")
+rf.auc@y.values #auc = 0.9798993
+```
+
+```{r rf_holdout_roc}
+# colorize ROC
+rf.roc.df <- data.frame(c("FPR" = rf.ROC@x.values, "TPR" = rf.ROC@y.values, "Threshold" = rf.ROC@alpha.values))
+rf.roc.df$Threshold[1] <- 1 # replace infinity
+
+rf.roc.df %>% ggplot(aes(FPR, TPR))+
+    geom_line(aes(color=Threshold), lwd = 2)+
+    scale_colour_viridis(option = "plasma")+
+    geom_abline(lwd = 1, color = "gray")+
+    theme_bw()+
+    theme(axis.line = element_line(color='gray'),
+          plot.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    ggtitle("ROC of Random Forest (mtry = 2)")+
+    annotate("text", x = 0.75, y = 0.25, label = "AUC = 0.9799")
+```
+
+```{r RF_decision_boundary}
+# predict over boundary.grid.
+boundary.probs <- predict(rf.tuning, boundary.grid, type = "prob")
+boundary.df <- cbind(boundary.grid, boundary.probs[2])
+
+new.holdout <- holdout
+new.holdout$hitmiss <- factor(ifelse(rf.holdout.preds==holdout$class,'hit', 'miss'))
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$green==117)),
+                        breaks = seq(0,1.0001,length.out=14),
+                        aes(x=red, y=blue, z=tarp), bins = 13)+
+  scale_fill_manual(values = colPal,guide = "none")+
+  theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+  geom_jitter(data = new.holdout[which(new.holdout$green==117), ],
+              size = 2, stroke = 1.3, 
+              aes(x=red, y=blue, color=class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("Random Forest Decision Boundary [Blue against Red]")
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$red==140)),
+                        breaks = seq(0,1.0001,length.out=14),
+                        aes(x=green, y=blue, z=tarp), bins = 13)+
+  scale_fill_manual(values = colPal,guide = "none")+
+    theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    geom_jitter(data = new.holdout[which(new.holdout$red==140), ],
+                size = 2, stroke = 1.3,
+                aes(x=green, y=blue, color=class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("Random Forest Decision Boundary [Blue against Green]")
+```
+
+# Support-Vector Machine [Polynomial] {.tabset}
+
+## Training
+```{r svmP_tuning_seeds}
+set.seed(199)
+svmP.seeds <- vector(mode = "list", length = 51)
+for(i in 1:(length(svmP.seeds)-1)) svmP.seeds[[i]]<- sample.int(n=1000, 15)
+svmP.seeds[[51]]<-sample.int(1000, 1)
+```
+
+---
+
+```{r define_svmPolyCustom}
+# We create a custom SVM with Polynomial kernel so that we can tune over offset.
+# The default svmPoly offered by train sets offset = 1. This should be tunable--
+# or at the very least, we should be able to set offset = 0.
+
+svmPolyCustom <- list(type = "Classification",
+                      library = "kernlab",
+                      loop = NULL)
+
+prm <- data.frame(parameter = c("degree", "scale", "offset", "C"),
+                  class = rep("numeric", 4),
+                  label = c("Degree", "Scale", "Offset", "Cost"))
+
+svmPolyCustom$parameters <- prm
+
+svmGrid <- function(x, y, len = NULL, search = "grid") {
+  if(search == "grid") {
+    out <- expand.grid(degree = seq(1, min(len, 3)),
+                       scale = 10 ^((1:len) - 4),
+                       offset = (-1)^(1:len)*ceiling((0:(len-1))/2),
+                       C = 2 ^((1:len) - 3))
+    } else {
+      out <- data.frame(degree = sample(1:3, size = len, replace = TRUE),
+                        scale = 10^runif(len, min = -5, log10(2)),
+                        offset = runif(len, min = -len, max = len),
+                        C = 2^runif(len, min = -5, max = 10))
+      }
+  out
+}
+
+svmPolyCustom$grid <- svmGrid
+
+svmFit <- function(x, y, wts, param, lev, last, classProbs, ...) {
+  if(any(names(list(...)) == "prob.model") | is.numeric(y)) {
+    out <- kernlab::ksvm(x = as.matrix(x), 
+                         y = y,
+                         kernel = kernlab::polydot(degree = param$degree,
+                                                   scale = param$scale,
+                                                   offset = param$offset),
+                         C = param$C, ...)
+    } else {
+      out <- kernlab::ksvm(x = as.matrix(x), 
+                           y = y,
+                           kernel = kernlab::polydot(degree = param$degree,
+                                                     scale = param$scale,
+                                                     offset = 0),
+                           C = param$C,
+                           prob.model = classProbs,
+                           ...)
+      }
+  out
+}
+
+svmPolyCustom$fit <- svmFit
+
+svmPred <- function(modelFit, newdata, submodels = NULL) {
+                    svmPred <- function(obj, x) {
+                      hasPM <- !is.null(unlist(obj@prob.model))
+                      if(hasPM) {
+                        pred <- kernlab::lev(obj)[apply(kernlab::predict(obj, x, type = "probabilities"), 
+                                               1, which.max)]
+                      } else pred <- kernlab::predict(obj, x)
+                      pred
+                    }
+                    out <- try(svmPred(modelFit, newdata), silent = TRUE)
+                    if(is.character(kernlab::lev(modelFit))) {
+                      if(class(out)[1] == "try-error") {
+                        warning("kernlab class prediction calculations failed; returning NAs")
+                        out <- rep("", nrow(newdata))
+                        out[seq(along = out)] <- NA
+                      }
+                    } else {
+                      if(class(out)[1] == "try-error") {
+                        warning("kernlab prediction calculations failed; returning NAs")
+                        out <- rep(NA, nrow(newdata))
+                      } 
+                    }
+                    if(is.matrix(out)) out <- out[,1]
+                    out
+                  }
+
+svmPolyCustom$predict <- svmPred
+
+svmProb <- function(modelFit, newdata, submodels = NULL) {
+                    out <- try(kernlab::predict(modelFit, newdata, type="probabilities"),
+                               silent = TRUE)
+                    if(class(out)[1] != "try-error") {
+                      ## There are times when the SVM probability model will
+                      ## produce negative class probabilities, so we
+                      ## induce vlaues between 0 and 1
+                      if(any(out < 0)) {
+                        out[out < 0] <- 0
+                        out <- t(apply(out, 1, function(x) x/sum(x)))
+                      }
+                      out <- out[, kernlab::lev(modelFit), drop = FALSE]
+                    } else {
+                      warning("kernlab class probability calculations failed; returning NAs")
+                      out <- matrix(NA, nrow(newdata) * length(kernlab::lev(modelFit)), ncol = length(kernlab::lev(modelFit)))
+                      colnames(out) <- kernlab::lev(modelFit)
+                    }
+                    out
+}
+
+svmPolyCustom$prob <- svmProb
+
+svmSort <- function(x) x[order(x$degree, x$C, x$scale),]
+
+svmPolyCustom$sort <- svmSort
+
+svmLevels <- function(x) kernlab::lev(x)
+
+svmPolyCustom$levels <- svmLevels
+```
+
+```{r tune_custom_SVM}
+svmP.grid2 <- expand.grid(degree = c(2,3,4),
+                         scale = 1,
+                         offset = 0,
+                         C = c(0.1,1,10,100,1000))
+
+svmP.control2 <- trainControl(method = "repeatedcv", 
+                              number = 10, 
+                              repeats = 5, 
+                              seeds = svmP.seeds,
+                              classProbs = T)
+
+svmP.tuning2 <- train(class~.,
+                      data = tuning,
+                      subset = train,
+                      method = svmPolyCustom,
+                      metric = 'Accuracy',
+                      trControl = svmP.control2,
+                      tuneGrid = svmP.grid2,
+                      preProcess = c("center","scale"))
+svmP.tuning2
+```
+
+```{r svm_custom_tuning_performance}
+svmP.tuning2$finalModel
+
+svmP.tuning2.preds <- predict(svmP.tuning2, newdata = testX)
+confusionMatrix(svmP.tuning2.preds, testLabels, positive = 'tarp')
+```
+
+## Holdout
+```{r svm_custom_holdout_predictions}
+svmP.holdout.preds2 <- predict(svmP.tuning2, newdata = holdoutX)
+confusionMatrix(svmP.holdout.preds2, holdoutLabels, positive = 'tarp')
+
+# Predict Probabilities for ROC
+svmP.holdout.probs2 <- predict(svmP.tuning2, newdata = holdoutX, type = "prob")
+
+svmP.rates2 <- prediction(svmP.holdout.probs2[2], holdoutLabels)
+svmP.ROC2 <- performance(svmP.rates2, measure = "tpr", x.measure = "fpr")
+
+svmP.auc2 <- performance(svmP.rates2, measure = "auc")
+svmP.auc2@y.values #auc = 0.9991007
+```
+
+```{r svm_custom_holdout_roc}
+# colorize ROC.
+svmP.roc.df2 <- data.frame(c("FPR" = svmP.ROC2@x.values, "TPR" = svmP.ROC2@y.values, "Threshold" = svmP.ROC2@alpha.values))
+svmP.roc.df2$Threshold[1] <- 1 # replace infinity
+
+svmP.roc.df2 %>% ggplot(aes(FPR, TPR))+
+    geom_line(aes(color=Threshold), lwd = 2)+
+    scale_colour_viridis(option = "plasma")+
+    geom_abline(lwd = 1, color = "gray")+
+    theme_bw()+
+    theme(axis.line = element_line(color='gray'),
+          plot.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    ggtitle("ROC of SVM [Polynomial: degree = 3, cost = 10]")+
+    annotate("text", x = 0.75, y = 0.25, label = "AUC = 0.9991")
+```
+
+```{r svmpoly_decision_boundary}
+# predict over boundary.grid.
+boundary.probs <- predict(svmP.tuning2, boundary.grid, type = "prob")
+boundary.df <- cbind(boundary.grid, boundary.probs[2])
+
+new.holdout <- holdout
+new.holdout$hitmiss <- factor(ifelse(svmP.holdout.preds2==holdout$class,'hit', 'miss'))
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$green==117)),
+                        breaks = seq(0,1.0001,length.out=14),
+                        aes(x=red, y=blue, z=tarp), bins = 13)+
+  scale_fill_manual(values = colPal,guide = "none")+
+    theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+  geom_jitter(data = new.holdout[which(new.holdout$green==117), ],
+              size = 2, stroke = 1.3, 
+              aes(x=red, y=blue, color=class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("SVM [Polynomial d = 3] Decision Boundary [Blue against Red]")
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$red==140)),
+                        breaks = seq(0,1.0001,length.out=14),
+                        aes(x=green, y=blue, z=tarp), bins = 13)+
+  scale_fill_manual(values = colPal,guide = "none")+
+    theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    geom_jitter(data = new.holdout[which(new.holdout$red==140), ],
+                size = 2, stroke = 1.3,
+                aes(x=green, y=blue, color=class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("SVM [Polynomial d = 3] Decision Boundary [Blue against Green]")
+```
+
+# Support-Vector Machine [RBF] {.tabset}
+
+## Training
+```{r svmR_tuning1}
+set.seed(199)
+svmR.seeds <- vector(mode = "list", length = 51)
+for(i in 1:(length(svmR.seeds)-1)) svmR.seeds[[i]]<- sample.int(n=1000, 25)
+svmR.seeds[[51]]<-sample.int(1000, 1)
+
+svmR.grid <- expand.grid(sigma = c(0.5,1,2,5,10),
+                         C = c(0.1,1,10,100,1000))
+
+svmR.control1 <- trainControl(method = "repeatedcv", 
+                              number = 10, 
+                              repeats = 5, 
+                              seeds = svmR.seeds,
+                              classProbs = T)
+
+svmR.tuning1 <- train(class~.,
+                      data = tuning,
+                      subset = train,
+                      method = 'svmRadial',
+                      metric = 'Accuracy',
+                      trControl = svmR.control1,
+                      tuneGrid = svmR.grid,
+                      preProcess = c("center","scale"))
+svmR.tuning1
+```
+
+```{r svmR_tuning1_performance}
+svmR.tuning1$finalModel
+
+svmR.tuning1.preds <- predict(svmR.tuning1, newdata = testX)
+confusionMatrix(svmR.tuning1.preds, testLabels, positive = 'tarp')
+```
+
+## Holdout
+```{r svmR_holdout_predictions}
+svmR.holdout.preds <- predict(svmR.tuning1, newdata = holdoutX)
+confusionMatrix(svmR.holdout.preds, holdoutLabels, positive = 'tarp')
+
+# Predict Probabilities for ROC
+svmR.holdout.probs <- predict(svmR.tuning1, newdata = holdoutX, type = 'prob')
+
+svmR.rates <- prediction(svmR.holdout.probs[2], holdoutLabels)
+svmR.ROC <- performance(svmR.rates, measure = "tpr", x.measure = "fpr")
+
+svmR.auc <- performance(svmR.rates, measure = "auc")
+svmR.auc@y.values #auc = 0.986921
+```
+
+```{r svmR_holdout_roc}
+# colorize ROC
+svmR.roc.df <- data.frame(c("FPR" = svmR.ROC@x.values, "TPR" = svmR.ROC@y.values, "Threshold" = svmR.ROC@alpha.values))
+svmR.roc.df$Threshold[1] <- 1 # replace infinity
+
+svmR.roc.df %>% ggplot(aes(FPR, TPR))+
+    geom_line(aes(color=Threshold), lwd = 2)+
+    scale_colour_viridis(option = "plasma")+
+    geom_abline(lwd = 1, color = "gray")+
+    theme_bw()+
+    theme(axis.line = element_line(color='gray'),
+          plot.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    ggtitle("ROC of SVM [RBF: gamma = 5, cost = 1000]")+
+    annotate("text", x = 0.75, y = 0.25, label = "AUC = 0.9869")
+```
+
+```{r svmrbf_decision_boundary}
+# predict over boundary.grid.
+boundary.probs <- predict(svmR.tuning1, boundary.grid, type = "prob")
+boundary.df <- cbind(boundary.grid, boundary.probs[2])
+
+new.holdout <- holdout
+new.holdout$hitmiss <- factor(ifelse(svmR.holdout.preds==holdout$class,'hit', 'miss'))
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$green==117)),
+                        breaks = seq(0,1.0001,length.out=14),
+                        aes(x=red, y=blue, z=tarp), bins = 13)+
+  scale_fill_manual(values = colPal,guide = "none")+
+    theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+  geom_jitter(data = new.holdout[which(new.holdout$green==117), ],
+              size = 2, stroke = 1.3, 
+              aes(x=red, y=blue, color=class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("SVM RBF
+          Decision Boundary [Blue against Red]")
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$red==140)),
+                        breaks = seq(0,1.0001,length.out=14),
+                        aes(x=green, y=blue, z=tarp), bins = 13)+
+  scale_fill_manual(values = colPal,guide = "none")+
+    theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    geom_jitter(data = new.holdout[which(new.holdout$red==140), ],
+                size = 2, stroke = 1.3,
+                aes(x=green, y=blue, color=class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("SVM RBF Decision Boundary [Blue against Green]")
+```
+
+# Mahalanobis Classifier
+## Professor's Method {.tabset}
+### Training
+We evaluate the accuracy of Professor Basener's Mahalanobis Distance Classifier.
+The only parameter for this method is the p-value threshold used to label the testing points. 
+Ideally, we would tune this with cross-validation. In the interest of simplicity, we just use a test/train split.
+```{r Mahalanobis_classifier}
+library(MASS)
+
+# create copy of tuning
+training.copy <- tuning[train, ]
+testing.copy <- tuning[-train, ]
+
+# create df with only tarps
+tarpsOnly <- training.copy[which(training.copy$class == "tarp"), ]
+
+# create dfs with only RGB values for
+tarpsOnly_rgb <- tarpsOnly[, -1]
+testing.copy_rgb <- testing.copy[, -1]
+
+
+# Compute Mahalanobis Distances
+testing.copy$mahalanobis <- mahalanobis(testing.copy_rgb, 
+                                       colMeans(tarpsOnly_rgb), 
+                                       cov(tarpsOnly_rgb))
+testing.copy$pvalue <- pchisq(testing.copy$mahalanobis, df=3, lower.tail=FALSE)
+
+# idea: create ROC-like plot...
+# idea: line plot accuracy (and TPR and FPR) against Mahalanobis Dist to select cut off
+```
+
+```{r mahalanobis_threshold_setting}
+# use p-values to set threshold
+threshold.mesh <- seq(0.01,0.99,length.out=99)
+acc <- c()
+tpr <- c()
+fpr <- c()
+ppv <- c()
+
+for (tr in 1:length(threshold.mesh)){
+  predicted.labels <- ifelse(testing.copy$pvalue>=threshold.mesh[tr], "tarp", "other")
+  cf.matrix <- table(predicted.labels, testing.copy$class)
+
+  acc[tr] <- (cf.matrix[1,1]+cf.matrix[2,2])/sum(cf.matrix)
+  tpr[tr] <- cf.matrix[2,2]/(cf.matrix[2,2]+cf.matrix[1,2])
+  fpr[tr] <- cf.matrix[2,1]/(cf.matrix[2,1]+cf.matrix[1,1])
+  ppv[tr] <- cf.matrix[2,2]/(cf.matrix[2,2]+cf.matrix[2,1])
+}
+
+threshold.df <- cbind(threshold.mesh, acc, tpr, fpr, ppv) %>% data.frame()
+colnames(threshold.df) <- c("threshold", "accuracy", "TPR", "FPR", "PPV")
+threshold.df$threshold <- as.numeric(threshold.df$threshold)
+
+#ideal threshold based on overall accuracy
+(best.thresh <- threshold.df$threshold[which.max(threshold.df$accuracy)])
+
+plot(x=threshold.df$threshold, y=threshold.df$accuracy,
+     xlab = "p-value Threshold",
+     ylab = " Accuracy",
+     main = "Prediction Accuracy against p-value Threshold",
+     type = "l")
+```
+
+The test/train split chooses a p-value threshold of 0.27. Observations with p-values greater
+than 0.27 are classified as `tarp`, and observations with p-values below 0.27 are classified
+as `other`. We now, view the confusion matrix for the testing data at this threshold.
+```{r mahalanobis_plots}
+Mah.labels <- ifelse(testing.copy$pvalue>=best.thresh, "tarp", "other") %>% factor()
+confusionMatrix(Mah.labels, testing.copy$class, positive = "tarp")
+```
+
+### Holdout
+We now apply the classifier to the holdout data.
+```{r mahalanobis_holdout}
+#create copy of holdout data
+holdout.copy <- holdout
+holdout.copy_rgb <- holdout.copy[,-4]
+
+# compute Mah Dist and p-values for each obsv in holdout
+holdout.copy$mahalanobis <- mahalanobis(holdout.copy_rgb, 
+                                       colMeans(tarpsOnly_rgb), 
+                                       cov(tarpsOnly_rgb))
+holdout.copy$pvalue <- pchisq(holdout.copy$mahalanobis, df=3, lower.tail=FALSE)
+
+# ----
+acc.h <- c()
+tpr.h <- c()
+fpr.h <- c()
+ppv.h <- c()
+
+for (tr in 1:length(threshold.mesh)){
+  predicted.labels <- ifelse(holdout.copy$pvalue>=threshold.mesh[tr], "tarp", "other")
+  cf.matrix <- table(predicted.labels, holdout.copy$class)
+
+  acc.h[tr] <- (cf.matrix[1,1]+cf.matrix[2,2])/sum(cf.matrix)
+  tpr.h[tr] <- cf.matrix[2,2]/(cf.matrix[2,2]+cf.matrix[1,2])
+  fpr.h[tr] <- cf.matrix[2,1]/(cf.matrix[2,1]+cf.matrix[1,1])
+  ppv.h[tr] <- cf.matrix[2,2]/(cf.matrix[2,2]+cf.matrix[2,1])
+}
+
+threshold.df.h <- cbind(threshold.mesh, acc.h, tpr.h, fpr.h, ppv.h) %>% data.frame()
+colnames(threshold.df.h) <- c("threshold", "accuracy", "TPR", "FPR", "PPV")
+threshold.df.h$threshold <- as.numeric(threshold.df.h$threshold)
+
+#ideal threshold based on overall accuracy
+(best.thresh.h <- threshold.df.h$threshold[which.max(threshold.df.h$accuracy)])
+
+plot(x=threshold.df.h$threshold, y=threshold.df.h$accuracy,
+     xlab = "p-value Threshold",
+     ylab = " Accuracy",
+     main = "Prediction Accuracy against p-value Threshold",
+     type = "l")
+
+# apply labels using p-value threshold = 0.27
+predicted.labels.holdout <- ifelse(holdout.copy$pvalue >= best.thresh.h, "tarp", "other") %>% factor()
+# confusionMatrix
+confusionMatrix(predicted.labels.holdout, holdout.copy$class, positive = "tarp")
+```
+
+```{r mahalanobis_holdout_roc}
+mahalanobis.holdout.probs <- holdout.copy$pvalue
+
+mahalanobis.rates <- prediction(mahalanobis.holdout.probs, holdout.copy$class)
+mahalanobis.ROC <- performance(mahalanobis.rates, measure = 'tpr', x.measure = 'fpr')
+
+mahalanobis.auc <- performance(mahalanobis.rates, measure = "auc")
+mahalanobis.auc@y.values #auc = 0.7543164
+
+# colorize ROC
+mahalanobis.roc.df <- data.frame(c("FPR" = mahalanobis.ROC@x.values, 
+                                "TPR" = mahalanobis.ROC@y.values, 
+                                "Threshold" = mahalanobis.ROC@alpha.values))
+mahalanobis.roc.df$Threshold[1] <- 1 # replace infinity
+
+mahalanobis.roc.df %>% ggplot(aes(FPR, TPR))+
+    geom_line(aes(color=Threshold), lwd = 2)+
+    scale_colour_viridis(option = "plasma")+
+    geom_abline(lwd = 1, color = "gray")+
+    theme_bw()+
+    theme(axis.line = element_line(color='gray'),
+          plot.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    ggtitle("ROC of Mahalanobis Distance Classifier")+
+    annotate("text", x = 0.75, y = 0.25, label = "AUC = 0.7624")
+```
+
+```{r mahalanobis_decision_boundary}
+
+boundary.dist <- mahalanobis(boundary.grid,
+                             colMeans(tarpsOnly_rgb),
+                             cov(tarpsOnly_rgb))
+boundary.probs <- pchisq(boundary.dist, df = 3, lower.tail = F)
+
+boundary.df <- cbind(boundary.grid, boundary.probs, boundary.dist)
+
+holdout.copy$labels <- ifelse(holdout.copy$pvalue >= best.thresh.h, "tarp", "other")
+holdout.copy$hitmiss <- factor(ifelse(holdout.copy$labels==holdout.copy$class,'hit', 'miss'))
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$green==186)),
+                        breaks =seq(0,1,length.out = 14),
+                        aes(x=red, y=blue, z=boundary.probs), bins = 13)+
+  scale_fill_manual(values = colPal, guide = "none")+
+    theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+        
+    geom_jitter(data = holdout.copy[which(holdout.copy$green==186), ],
+                size = 2, stroke = 1.3,
+                aes(x=red, y=blue, color=class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("Mahalanobis Classifier Decision Boundary [Blue against Red]")
+
+ggplot(data = NULL)+
+    geom_contour_filled(data = slice(boundary.df,which(boundary.df$red==140)),
+                        breaks = seq(0,1,length.out = 14),
+                        aes(x=green, y=blue, z=boundary.probs), bins = 13)+
+  scale_fill_manual(values = colPal, guide = "none")+
+    theme(axis.line = element_line(color='gray'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    geom_jitter(data = holdout.copy[which(holdout.copy$red==140), ],
+                size = 2, stroke = 1.3,
+                aes(x=green, y=blue, color = class, shape = hitmiss))+
+  scale_color_manual(values=c("#964B00", "#153250"))+
+  scale_shape_manual(values=c(20,4))+
+  ggtitle("Mahalanobis Classifier Decision Boundary [Blue against Green]")
+```
+
+## *Mahalanobis with PCA Projection?*
+The overall accuracy of the Mahalanobis Classifier method is quite good, and comparable 
+to the other methods tested. However, the sensitivity (TPR) is exceptionally poor. We ask, will 
+creating a PCA projection of the RGB values lead to a significant increase in sensitivity?
+```{r mahalanobis_pca}
+# Create Principal Components from training subset; save loadings
+train_pc <- prcomp(training.copy[, 2:4], center = T, scale = T)
+loadings <- train_pc$rotation
+
+# reattach labels
+train_pc_copy <- train_pc$x %>% data.frame()
+train_pc_copy$class <- tuning[train, "class"]
+
+
+#section out tarps
+tarpsOnly_pc <- train_pc_copy[which(train_pc_copy$class == "tarp"), ]
+
+tarpsOnly_pc_rgb <- tarpsOnly_pc[,1:3]
+
+holdout_pc_rgb <- scale(holdout.copy[1:3], train_pc$center, train_pc$scale) %*% loadings
+
+holdout_pc_copy <- holdout_pc_rgb %>% data.frame()
+holdout_pc_copy$class <- holdout$class
+
+# calculate mahalanobis dist
+holdout_pc_copy$mahalanobis <- mahalanobis(holdout_pc_rgb, 
+                                       colMeans(tarpsOnly_pc_rgb), 
+                                       cov(tarpsOnly_pc_rgb))
+holdout_pc_copy$pvalue <- pchisq(holdout_pc_copy$mahalanobis, df=3, lower.tail=FALSE)
+
+# ----
+acc.h <- c()
+tpr.h <- c()
+fpr.h <- c()
+ppv.h <- c()
+
+for (tr in 1:length(threshold.mesh)){
+  predicted.labels <- ifelse(holdout_pc_copy$pvalue>=threshold.mesh[tr], "tarp", "other")
+  cf.matrix <- table(predicted.labels, holdout_pc_copy$class)
+
+  acc.h[tr] <- (cf.matrix[1,1]+cf.matrix[2,2])/sum(cf.matrix)
+  tpr.h[tr] <- cf.matrix[2,2]/(cf.matrix[2,2]+cf.matrix[1,2])
+  fpr.h[tr] <- cf.matrix[2,1]/(cf.matrix[2,1]+cf.matrix[1,1])
+  ppv.h[tr] <- cf.matrix[2,2]/(cf.matrix[2,2]+cf.matrix[2,1])
+}
+
+threshold.df.h <- cbind(threshold.mesh, acc.h, tpr.h, fpr.h, ppv.h) %>% data.frame()
+colnames(threshold.df.h) <- c("threshold", "accuracy", "TPR", "FPR", "PPV")
+threshold.df.h$threshold <- as.numeric(threshold.df.h$threshold)
+
+#ideal threshold based on overall accuracy
+(best.thresh.h <- threshold.df.h$threshold[which.max(threshold.df.h$accuracy)])
+
+plot(x=threshold.df.h$threshold, y=threshold.df.h$accuracy,
+     xlab = "p-value Threshold",
+     ylab = " Accuracy",
+     main = "Prediction Accuracy against p-value Threshold",
+     type = "l")
+
+# apply labels using p-value threshold = 0.27
+predicted.labels.holdout <- ifelse(holdout_pc_copy$pvalue >= best.thresh.h, "tarp", "other") %>% factor()
+# confusionMatrix
+confusionMatrix(predicted.labels.holdout, holdout_pc_copy$class, positive = "tarp")
+
+# ---
+mahalanobis.holdout.probs <- holdout_pc_copy$pvalue
+
+mahalanobis.rates <- prediction(mahalanobis.holdout.probs, holdout_pc_copy$class)
+mahalanobis.ROC <- performance(mahalanobis.rates, measure = 'tpr', x.measure = 'fpr')
+
+mahalanobis.auc <- performance(mahalanobis.rates, measure = "auc")
+mahalanobis.auc@y.values #auc = 0.7543164
+
+# colorize ROC
+mahalanobis.roc.df <- data.frame(c("FPR" = mahalanobis.ROC@x.values, 
+                                "TPR" = mahalanobis.ROC@y.values, 
+                                "Threshold" = mahalanobis.ROC@alpha.values))
+mahalanobis.roc.df$Threshold[1] <- 1 # replace infinity
+
+mahalanobis.roc.df %>% ggplot(aes(FPR, TPR))+
+    geom_line(aes(color=Threshold), lwd = 2)+
+    scale_colour_viridis(option = "plasma")+
+    geom_abline(lwd = 1, color = "gray")+
+    theme_bw()+
+    theme(axis.line = element_line(color='gray'),
+          plot.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank())+
+    ggtitle("ROC of Mahalanobis Distance Classifier")+
+    annotate("text", x = 0.75, y = 0.25, label = "AUC = 0.7624")
+```
+
+```{r cov}
+cov(tarpsOnly_pc_rgb)
+cov(tarpsOnly_rgb)
+```
