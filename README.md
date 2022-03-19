@@ -1,12 +1,14 @@
 # Haiti Earthquake Relief Effort: Finding Blue Tarps
 
 ### Introduction
-This repository represents my final submission for course DS 6030 in the University of Virginia's Master of Science, Data Science.
+This repository represents my final project for course DS 6030, Statistical Learning, in the University of Virginia's Master of Science, Data Science program.
 
 In the aftermath of the 2010 Haiti earthquake, rescue workers needed a way to find displaced people from aerial photographs. Researchers from Rochester Institute of Technology developed a statiscal model which took pixel RGB values as input and returned probabilites that a given pixel represented a blue tarp, indicating a temporary shelter. The original study can be found here:  
 https://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.388.2622&rep=rep1&type=pdf
 
-I expand upon this study by comparing eight model types: *k-Nearest Neighbors, Linear Discriminant Analysis, Quadratic Discriminant Analysis, Logistic Regression, Random Forest, Support Vector Machine (polynomial kernel), Support Vector Machine (RBF kernel), Mahalanobis Classifier.* I also develop a framework for visualizing binary classifier decision boundaries in two dimensions.
+I expand upon this study by comparing eight model types: *k-Nearest Neighbors, Linear Discriminant Analysis, Quadratic Discriminant Analysis, Logistic Regression, Random Forest, Support Vector Machine (polynomial kernel), Support Vector Machine (RBF kernel), Mahalanobis Classifier.*
+
+I also develop a framework for visualizing binary classifier decision boundaries in two dimensions.
 
 Random Forest | Support-Vector Machine (Polynomial Kernel)
 :------------:|:----------------------------------------:
