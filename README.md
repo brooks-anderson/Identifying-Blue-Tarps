@@ -6,7 +6,7 @@ This repository represents my final project for course DS 6030, Statistical Lear
 In the aftermath of the 2010 Haiti earthquake, rescue workers needed a way to find displaced people from aerial photographs. Researchers from Rochester Institute of Technology developed a statiscal model which took pixel RGB values as input and returned probabilites that a given pixel represented a blue tarp, indicating a temporary shelter. The original study can be found here:  
 https://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.388.2622&rep=rep1&type=pdf
 
-I expand upon this study by comparing eight model types: *k-Nearest Neighbors, Linear Discriminant Analysis, Quadratic Discriminant Analysis, Logistic Regression, Random Forest, Support Vector Machine (polynomial kernel), Support Vector Machine (RBF kernel), Mahalanobis Classifier.*
+I expand upon this study by comparing eight classification algorithms: *k-Nearest Neighbors, Linear Discriminant Analysis, Quadratic Discriminant Analysis, Logistic Regression, Random Forest, Support Vector Machine (polynomial kernel), Support Vector Machine (RBF kernel), Mahalanobis Classifier.*
 
 I also develop a framework for visualizing binary classifier decision boundaries in two dimensions.
 
